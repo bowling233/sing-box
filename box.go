@@ -25,6 +25,7 @@ import (
 	"github.com/sagernet/sing-box/experimental/cachefile"
 	"github.com/sagernet/sing-box/experimental/clashmode"
 	"github.com/sagernet/sing-box/experimental/deprecated"
+	oteltraffic "github.com/sagernet/sing-box/experimental/opentelemetry"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/direct"
@@ -255,6 +256,20 @@ func New(options Options) (*Box, error) {
 	}
 	referenceManager := route.NewReferenceManager(ctx, logFactory.NewLogger("reference"), options.Options)
 	internalServices = append(internalServices, referenceManager)
+	if experimentalOptions.OpenTelemetry != nil && experimentalOptions.OpenTelemetry.Enabled && !oteltraffic.SDKDisabled() {
+		trafficReporter, err := oteltraffic.New(
+			ctx,
+			logFactory.NewLogger("opentelemetry"),
+			*experimentalOptions.OpenTelemetry,
+			outboundManager,
+		)
+		if err != nil {
+			return nil, E.Cause(err, "create OpenTelemetry traffic reporter")
+		}
+		service.MustRegister[adapter.OutboundTelemetry](ctx, trafficReporter)
+		router.AppendTracker(trafficReporter)
+		internalServices = append(internalServices, trafficReporter)
+	}
 	ntpOptions := common.PtrValueOrDefault(options.NTP)
 	var timeService *tls.TimeServiceWrapper
 	if ntpOptions.Enabled {
@@ -392,7 +407,7 @@ func New(options Options) (*Box, error) {
 	}
 	outboundManager.Initialize(func() (adapter.Outbound, error) {
 		return direct.NewOutbound(
-			ctx,
+			adapter.ContextWithOutboundIdentity(ctx, adapter.OutboundIdentity{Name: "direct", Type: C.TypeDirect}),
 			router,
 			logFactory.NewLogger("outbound/direct"),
 			"direct",

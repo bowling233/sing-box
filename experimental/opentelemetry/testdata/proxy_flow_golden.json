@@ -1,0 +1,37 @@
+{
+  "event_name": "proxy.flow",
+  "timestamp_unix_nano": 1000000000,
+  "observed_timestamp_unix_nano": 61000000000,
+  "attributes": {
+    "client.address": "192.0.2.10",
+    "client.port": 52341,
+    "network.protocol.name": "tls",
+    "network.transport": "tcp",
+    "process.executable.name": "curl",
+    "process.executable.path": "/usr/bin/curl",
+    "process.real_user.id": 1000,
+    "proxy.destination.resolved_addresses": [
+      "203.0.113.8"
+    ],
+    "proxy.flow.end_reason": "active_timeout",
+    "proxy.flow.id": "00000000-0000-4000-8000-000000000001",
+    "proxy.flow.payload.downlink.bytes": 2048,
+    "proxy.flow.payload.uplink.bytes": 18432,
+    "proxy.flow.segment.sequence": 1,
+    "proxy.inbound.name": "tun-in",
+    "proxy.inbound.type": "tun",
+    "proxy.outbound.chain": [
+      "auto-select",
+      "node-a"
+    ],
+    "proxy.outbound.egress.name": "node-a",
+    "proxy.outbound.name": "auto-select",
+    "proxy.outbound.type": "url_test",
+    "proxy.rule.action": "auto-select",
+    "proxy.rule.matched": true,
+    "proxy.rule.type": "domain_suffix",
+    "proxy.rule.value": "example.com",
+    "server.address": "example.com",
+    "server.port": 443
+  }
+}

@@ -21,23 +21,28 @@ type DetourDialer struct {
 	detour                  string
 	defaultOutbound         bool
 	disableEmptyDirectCheck bool
+	owner                   adapter.OutboundIdentity
 	dialer                  N.Dialer
 	initOnce                sync.Once
 	initErr                 error
 }
 
-func NewDetour(outboundManager adapter.OutboundManager, detour string, disableEmptyDirectCheck bool) N.Dialer {
+func NewDetour(ctx context.Context, outboundManager adapter.OutboundManager, detour string, disableEmptyDirectCheck bool) N.Dialer {
+	owner, _ := adapter.OutboundIdentityFromContext(ctx)
 	return &DetourDialer{
 		outboundManager:         outboundManager,
 		detour:                  detour,
 		disableEmptyDirectCheck: disableEmptyDirectCheck,
+		owner:                   owner,
 	}
 }
 
-func NewDefaultOutboundDetour(outboundManager adapter.OutboundManager) N.Dialer {
+func NewDefaultOutboundDetour(ctx context.Context, outboundManager adapter.OutboundManager) N.Dialer {
+	owner, _ := adapter.OutboundIdentityFromContext(ctx)
 	return &DetourDialer{
 		outboundManager: outboundManager,
 		defaultOutbound: true,
+		owner:           owner,
 	}
 }
 
@@ -82,7 +87,13 @@ func (d *DetourDialer) DialContext(ctx context.Context, network string, destinat
 	if err != nil {
 		return nil, err
 	}
-	return dialer.DialContext(ctx, network, destination)
+	conn, err := dialer.DialContext(ctx, network, destination)
+	if err == nil {
+		if outbound, loaded := dialer.(adapter.Outbound); loaded {
+			adapter.RecordOutboundSelection(ctx, d.owner, adapter.IdentityOf(outbound))
+		}
+	}
+	return conn, err
 }
 
 func (d *DetourDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -90,7 +101,13 @@ func (d *DetourDialer) ListenPacket(ctx context.Context, destination M.Socksaddr
 	if err != nil {
 		return nil, err
 	}
-	return dialer.ListenPacket(ctx, destination)
+	conn, err := dialer.ListenPacket(ctx, destination)
+	if err == nil {
+		if outbound, loaded := dialer.(adapter.Outbound); loaded {
+			adapter.RecordOutboundSelection(ctx, d.owner, adapter.IdentityOf(outbound))
+		}
+	}
+	return conn, err
 }
 
 func (d *DetourDialer) Upstream() any {
