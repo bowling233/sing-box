@@ -1,3 +1,11 @@
+bowling233 的 sing-box fork：
+
+- 上游：`https://github.com/SagerNet/sing-box` 的 `stable` 分支
+- 维护：当上游发布新 tag 时，将本 fork 的变更 rebase 到上游的最新 tag 上
+- 变更：
+  - 原生 OpenTelemetry 流量上报
+  - 仅发布 `linux/amd64`、`linux/arm64` GHCR 容器镜像
+
 # sing-box
 
 The universal proxy platform.
