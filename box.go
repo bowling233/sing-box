@@ -25,6 +25,7 @@ import (
 	"github.com/sagernet/sing-box/experimental/cachefile"
 	"github.com/sagernet/sing-box/experimental/clashmode"
 	"github.com/sagernet/sing-box/experimental/deprecated"
+	oteltraffic "github.com/sagernet/sing-box/experimental/opentelemetry"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/direct"
@@ -424,6 +425,19 @@ func New(options Options) (*Box, error) {
 		cacheFile := cachefile.New(ctx, logFactory.NewLogger("cache-file"), common.PtrValueOrDefault(experimentalOptions.CacheFile))
 		service.MustRegister[adapter.CacheFile](ctx, cacheFile)
 		internalServices = append(internalServices, cacheFile)
+	}
+	if experimentalOptions.OpenTelemetry != nil && experimentalOptions.OpenTelemetry.Enabled && !oteltraffic.SDKDisabled() {
+		trafficReporter, err := oteltraffic.New(
+			ctx,
+			logFactory.NewLogger("opentelemetry"),
+			*experimentalOptions.OpenTelemetry,
+			outboundManager,
+		)
+		if err != nil {
+			return nil, E.Cause(err, "create OpenTelemetry traffic reporter")
+		}
+		router.AppendTracker(trafficReporter)
+		internalServices = append(internalServices, trafficReporter)
 	}
 	if needClashAPI {
 		clashServer, err := experimental.NewClashServer(ctx, logFactory.(log.ObservableFactory), common.PtrValueOrDefault(experimentalOptions.ClashAPI))

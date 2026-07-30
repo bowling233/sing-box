@@ -3,10 +3,38 @@ package option
 import "github.com/sagernet/sing/common/json/badoption"
 
 type ExperimentalOptions struct {
-	CacheFile *CacheFileOptions `json:"cache_file,omitempty"`
-	ClashAPI  *ClashAPIOptions  `json:"clash_api,omitempty"`
-	V2RayAPI  *V2RayAPIOptions  `json:"v2ray_api,omitempty"`
-	Debug     *DebugOptions     `json:"debug,omitempty"`
+	CacheFile     *CacheFileOptions     `json:"cache_file,omitempty"`
+	ClashAPI      *ClashAPIOptions      `json:"clash_api,omitempty"`
+	V2RayAPI      *V2RayAPIOptions      `json:"v2ray_api,omitempty"`
+	OpenTelemetry *OpenTelemetryOptions `json:"opentelemetry,omitempty"`
+	Debug         *DebugOptions         `json:"debug,omitempty"`
+}
+
+type OpenTelemetryOptions struct {
+	Enabled            bool                      `json:"enabled,omitempty"`
+	Endpoint           string                    `json:"endpoint,omitempty"`
+	Protocol           string                    `json:"protocol,omitempty"`
+	Headers            map[string]string         `json:"headers,omitempty"`
+	Compression        string                    `json:"compression,omitempty"`
+	Timeout            badoption.Duration        `json:"timeout,omitempty"`
+	ActiveTimeout      badoption.Duration        `json:"active_timeout,omitempty"`
+	Batch              OpenTelemetryBatchOptions `json:"batch,omitempty"`
+	TLS                OpenTelemetryTLSOptions   `json:"tls,omitempty"`
+	ResourceAttributes map[string]string         `json:"resource_attributes,omitempty"`
+}
+
+type OpenTelemetryBatchOptions struct {
+	ScheduleDelay      badoption.Duration `json:"schedule_delay,omitempty"`
+	ExportTimeout      badoption.Duration `json:"export_timeout,omitempty"`
+	MaxQueueSize       int                `json:"max_queue_size,omitempty"`
+	MaxExportBatchSize int                `json:"max_export_batch_size,omitempty"`
+}
+
+type OpenTelemetryTLSOptions struct {
+	CACertificate      string `json:"ca_certificate,omitempty"`
+	ClientCertificate  string `json:"client_certificate,omitempty"`
+	ClientKey          string `json:"client_key,omitempty"`
+	InsecureSkipVerify bool   `json:"insecure_skip_verify,omitempty"`
 }
 
 type CacheFileOptions struct {
