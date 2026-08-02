@@ -1,0 +1,93 @@
+name: Build Linux Binaries
+
+on:
+  push:
+    branches:
+      - "**"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and publish Linux binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      CGO_ENABLED: "0"
+      GOOS: linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/SagerNet/sing-box.git \
+            '+refs/tags/v*:refs/tags/upstream/v*'
+          upstream_tag="$(git describe --tags --match 'upstream/v[0-9]*' --abbrev=0 HEAD)"
+          version="${upstream_tag#upstream/v}-${GITHUB_SHA::7}"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.8
+
+      - name: Fetch Cronet libraries
+        run: |
+          set -euo pipefail
+          CRONET_GO_VERSION=$(cat .github/CRONET_GO_VERSION)
+          git init "$RUNNER_TEMP/cronet-go-lib"
+          git -C "$RUNNER_TEMP/cronet-go-lib" remote add origin https://github.com/sagernet/cronet-go.git
+          git -C "$RUNNER_TEMP/cronet-go-lib" sparse-checkout set --no-cone \
+            '/lib/linux_amd64/libcronet.so' '/lib/linux_arm64/libcronet.so'
+          git -C "$RUNNER_TEMP/cronet-go-lib" fetch --depth=1 --filter=blob:none origin "$CRONET_GO_VERSION"
+          git -C "$RUNNER_TEMP/cronet-go-lib" checkout FETCH_HEAD
+
+      - name: Build and archive amd64 and arm64
+        run: |
+          set -euo pipefail
+          BUILD_TAGS="$(cat release/DEFAULT_BUILD_TAGS),with_purego"
+          LDFLAGS_SHARED="$(cat release/LDFLAGS)"
+          for arch in amd64 arm64; do
+            archive_name="sing-box-linux-${arch}"
+            mkdir -p "dist/${archive_name}"
+            GOARCH="$arch" go build -v -trimpath -o "dist/${archive_name}/sing-box" \
+              -tags "$BUILD_TAGS" \
+              -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
+              ./cmd/sing-box
+            cp "$RUNNER_TEMP/cronet-go-lib/lib/linux_${arch}/libcronet.so" "dist/${archive_name}/"
+            cp LICENSE "dist/${archive_name}/"
+            tar -czf "dist/${archive_name}.tar.gz" -C dist "$archive_name"
+          done
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          if (( ${#archives[@]} != 2 )); then
+            echo "Expected two Linux binary archives, found ${#archives[@]}" >&2
+            exit 1
+          fi
+          tag="v${VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${archives[@]}" --clobber
+          else
+            gh release create "$tag" "${archives[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "sing-box ${VERSION}" \
+              --notes "Linux amd64/arm64 purego binaries for commit ${GITHUB_SHA}. Includes libcronet.so for Naive outbound support." \
+              --prerelease --latest=false
+          fi
