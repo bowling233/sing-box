@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
@@ -103,6 +104,12 @@ func (c *trackedConn) Close() (err error) {
 func (c *trackedConn) Upstream() any           { return c.ExtendedConn }
 func (c *trackedConn) ReaderReplaceable() bool { return false }
 func (c *trackedConn) WriterReplaceable() bool { return false }
+func (c *trackedConn) RecordOutboundSelection(parent adapter.OutboundIdentity, selected adapter.OutboundIdentity) {
+	c.flow.RecordOutboundSelection(parent, selected)
+}
+func (c *trackedConn) RecordOutboundLeaf(outbound adapter.OutboundIdentity) {
+	c.flow.RecordOutboundLeaf(outbound)
+}
 
 type trackedPacketConn struct {
 	N.PacketConn
@@ -153,6 +160,54 @@ func (c *trackedPacketConn) Close() (err error) {
 func (c *trackedPacketConn) Upstream() any           { return c.PacketConn }
 func (c *trackedPacketConn) ReaderReplaceable() bool { return false }
 func (c *trackedPacketConn) WriterReplaceable() bool { return false }
+func (c *trackedPacketConn) RecordOutboundSelection(parent adapter.OutboundIdentity, selected adapter.OutboundIdentity) {
+	c.flow.RecordOutboundSelection(parent, selected)
+}
+func (c *trackedPacketConn) RecordOutboundLeaf(outbound adapter.OutboundIdentity) {
+	c.flow.RecordOutboundLeaf(outbound)
+}
+
+func (r *Reporter) RoutedFlow(_ context.Context, metadata adapter.InboundContext, matchedRule adapter.Rule, matchedOutbound adapter.Outbound) tun.FlowTracker {
+	if metadata.Network != N.NetworkTCP && metadata.Network != N.NetworkUDP {
+		return nil
+	}
+	flow := r.newFlow(r.metadata(metadata, matchedRule, matchedOutbound), metadata.Network, 0, 0)
+	if flow == nil {
+		return nil
+	}
+	return &trackedFlow{flow: flow}
+}
+
+type trackedFlow struct {
+	flow *Flow
+	once sync.Once
+}
+
+func (f *trackedFlow) AttachFlow(tun.FlowHandle) {}
+
+func (f *trackedFlow) CountForward(n int) {
+	f.flow.addUplink(int64(n), f.flow.udp)
+}
+
+func (f *trackedFlow) CountReverse(n int) {
+	f.flow.addDownlink(int64(n), f.flow.udp)
+}
+
+func (f *trackedFlow) FlowEstablished() {}
+
+func (f *trackedFlow) CloseFlow(tun.FlowCloseReason) {
+	f.once.Do(func() {
+		f.flow.snapshotNow("closed")
+	})
+}
+
+func (f *trackedFlow) RecordOutboundSelection(parent adapter.OutboundIdentity, selected adapter.OutboundIdentity) {
+	f.flow.RecordOutboundSelection(parent, selected)
+}
+
+func (f *trackedFlow) RecordOutboundLeaf(outbound adapter.OutboundIdentity) {
+	f.flow.RecordOutboundLeaf(outbound)
+}
 
 func (f *Flow) snapshotNow(reason string) {
 	f.snapshot(timeNow(), reason, true)
@@ -233,6 +288,12 @@ func (r *Reporter) outbound(matched adapter.Outbound) (name, outboundType string
 	}
 	name = matched.Tag()
 	outboundType = normalizeType(matched.Type())
+	if r.outboundManager == nil {
+		if name != "" {
+			chain = []string{name}
+		}
+		return name, outboundType, chain, name, outboundType
+	}
 	next := name
 	seen := make(map[string]struct{})
 	for len(chain) < 32 && next != "" {

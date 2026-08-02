@@ -16,6 +16,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/ntp"
 	"github.com/sagernet/sing/common/observable"
+	"github.com/sagernet/sing/service"
 )
 
 type HistoryStorage struct {
@@ -79,6 +80,9 @@ func (s *HistoryStorage) Close() error {
 }
 
 func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error) {
+	if link == "" {
+		link = "https://www.gstatic.com/generate_204"
+	}
 	multiplexOutbound, isMultiplexOutbound := common.Cast[adapter.OutboundWithMultiplex](detour)
 	if isMultiplexOutbound && multiplexOutbound.MultiplexEnabled() {
 		_, err := urlTest(ctx, link, detour)
@@ -86,13 +90,19 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error) 
 			return 0, err
 		}
 	}
-	return urlTest(ctx, link, detour)
+	delay, err := urlTest(ctx, link, detour)
+	completedAt := time.Now()
+	if err == nil {
+		telemetry := service.FromContext[adapter.OutboundTelemetry](ctx)
+		outbound, isOutbound := common.Cast[adapter.Outbound](detour)
+		if telemetry != nil && isOutbound {
+			telemetry.ObserveHealthCheck(outbound, link, int64(delay), completedAt)
+		}
+	}
+	return delay, err
 }
 
 func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err error) {
-	if link == "" {
-		link = "https://www.gstatic.com/generate_204"
-	}
 	linkURL, err := url.Parse(link)
 	if err != nil {
 		return

@@ -32,31 +32,38 @@ import (
 
 const (
 	eventName       = "proxy.flow"
-	scopeVersion    = "1.0.0-alpha.1"
-	schemaVersion   = "v1alpha1"
-	defaultEndpoint = "http://127.0.0.1:4318/v1/logs"
+	scopeVersion    = "v1alpha2"
+	schemaVersion   = "v1alpha2"
+	defaultEndpoint = "http://127.0.0.1:4318"
 	defaultActive   = time.Minute
 	minimumActive   = 10 * time.Second
 	maximumActive   = 24 * time.Hour
 )
 
 type reporterConfig struct {
-	endpoint           string
-	protocol           string
-	headers            map[string]string
-	compression        string
-	timeout            time.Duration
-	activeTimeout      time.Duration
-	batchScheduleDelay time.Duration
-	batchExportTimeout time.Duration
-	batchMaxQueueSize  int
-	batchMaxExportSize int
-	tls                option.OpenTelemetryTLSOptions
-	resourceAttributes map[string]string
+	endpoint             string
+	logsEndpoint         string
+	metricsEndpoint      string
+	protocol             string
+	headers              map[string]string
+	compression          string
+	timeout              time.Duration
+	activeTimeout        time.Duration
+	batchScheduleDelay   time.Duration
+	batchExportTimeout   time.Duration
+	batchMaxQueueSize    int
+	batchMaxExportSize   int
+	metricExportInterval time.Duration
+	metricExportTimeout  time.Duration
+	metricMaxQueueSize   int
+	tls                  option.OpenTelemetryTLSOptions
+	resourceAttributes   map[string]string
 }
 
 type eventSink interface {
 	emit(segment flowSegment)
+	addTransport(outbound adapter.OutboundIdentity, network string, direction string, bytes int64)
+	recordHealth(point healthPoint)
 	shutdown(ctx context.Context) error
 }
 
@@ -108,6 +115,30 @@ func New(
 }
 
 func (r *Reporter) Name() string { return "opentelemetry" }
+
+func (r *Reporter) ObserveTransport(outbound adapter.OutboundIdentity, network string, direction string, bytes int64) {
+	if r == nil || r.closed.Load() || r.sink == nil {
+		return
+	}
+	r.sink.addTransport(outbound, network, direction, bytes)
+}
+
+func (r *Reporter) ObserveHealthCheck(outbound adapter.Outbound, url string, latencyMS int64, completedAt time.Time) {
+	if r == nil || r.closed.Load() || r.sink == nil || outbound == nil {
+		return
+	}
+	_, _, _, egressName, egressType := r.outbound(outbound)
+	if egressName == "" {
+		egressName = outbound.Tag()
+		egressType = normalizeType(outbound.Type())
+	}
+	r.sink.recordHealth(healthPoint{
+		outbound:    adapter.OutboundIdentity{Name: egressName, Type: egressType},
+		url:         url,
+		latencyMS:   latencyMS,
+		completedAt: completedAt,
+	})
+}
 
 func (r *Reporter) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateInitialize || !r.started.CompareAndSwap(false, true) {
@@ -168,8 +199,12 @@ func (r *Reporter) Close() error {
 }
 
 func shutdownTimeout(config reporterConfig) time.Duration {
-	if config.batchExportTimeout > 0 {
-		return config.batchExportTimeout
+	timeout := config.batchExportTimeout
+	if config.metricExportTimeout > timeout {
+		timeout = config.metricExportTimeout
+	}
+	if timeout > 0 {
+		return timeout
 	}
 	return 30 * time.Second
 }
@@ -217,18 +252,23 @@ func (r *Reporter) remove(flow *Flow) {
 
 func resolveConfig(options option.OpenTelemetryOptions) (reporterConfig, error) {
 	config := reporterConfig{
-		endpoint:           options.Endpoint,
-		protocol:           options.Protocol,
-		headers:            options.Headers,
-		compression:        strings.ToLower(options.Compression),
-		timeout:            time.Duration(options.Timeout),
-		activeTimeout:      time.Duration(options.ActiveTimeout),
-		batchScheduleDelay: time.Duration(options.Batch.ScheduleDelay),
-		batchExportTimeout: time.Duration(options.Batch.ExportTimeout),
-		batchMaxQueueSize:  options.Batch.MaxQueueSize,
-		batchMaxExportSize: options.Batch.MaxExportBatchSize,
-		tls:                options.TLS,
-		resourceAttributes: options.ResourceAttributes,
+		endpoint:             options.Endpoint,
+		logsEndpoint:         options.LogsEndpoint,
+		metricsEndpoint:      options.MetricsEndpoint,
+		protocol:             options.Protocol,
+		headers:              options.Headers,
+		compression:          strings.ToLower(options.Compression),
+		timeout:              time.Duration(options.Timeout),
+		activeTimeout:        time.Duration(options.ActiveTimeout),
+		batchScheduleDelay:   time.Duration(options.Batch.ScheduleDelay),
+		batchExportTimeout:   time.Duration(options.Batch.ExportTimeout),
+		batchMaxQueueSize:    options.Batch.MaxQueueSize,
+		batchMaxExportSize:   options.Batch.MaxExportBatchSize,
+		metricExportInterval: time.Duration(options.Metrics.ExportInterval),
+		metricExportTimeout:  time.Duration(options.Metrics.ExportTimeout),
+		metricMaxQueueSize:   options.Metrics.MaxQueueSize,
+		tls:                  options.TLS,
+		resourceAttributes:   options.ResourceAttributes,
 	}
 	if config.protocol == "" {
 		config.protocol = "http/protobuf"
@@ -236,10 +276,12 @@ func resolveConfig(options option.OpenTelemetryOptions) (reporterConfig, error) 
 	if config.protocol != "http/protobuf" {
 		return config, fmt.Errorf("unsupported OpenTelemetry protocol %q", config.protocol)
 	}
-	if config.endpoint != "" {
-		parsed, err := url.Parse(config.endpoint)
-		if err != nil || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return config, fmt.Errorf("invalid OpenTelemetry endpoint %q", config.endpoint)
+	for _, endpoint := range []string{config.endpoint, config.logsEndpoint, config.metricsEndpoint} {
+		if endpoint != "" {
+			parsed, err := url.Parse(endpoint)
+			if err != nil || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.RawQuery != "" || parsed.Fragment != "" {
+				return config, fmt.Errorf("invalid OpenTelemetry endpoint %q", endpoint)
+			}
 		}
 	}
 	if config.compression != "" && config.compression != "gzip" && config.compression != "none" {
@@ -253,7 +295,7 @@ func resolveConfig(options option.OpenTelemetryOptions) (reporterConfig, error) 
 			return config, fmt.Errorf("invalid OpenTelemetry value for header %q", name)
 		}
 	}
-	if config.timeout < 0 || config.batchScheduleDelay < 0 || config.batchExportTimeout < 0 {
+	if config.timeout < 0 || config.batchScheduleDelay < 0 || config.batchExportTimeout < 0 || config.metricExportInterval < 0 || config.metricExportTimeout < 0 {
 		return config, errors.New("OpenTelemetry durations must not be negative")
 	}
 	if config.activeTimeout == 0 {
@@ -262,7 +304,7 @@ func resolveConfig(options option.OpenTelemetryOptions) (reporterConfig, error) 
 	if config.activeTimeout < minimumActive || config.activeTimeout > maximumActive {
 		return config, fmt.Errorf("OpenTelemetry active_timeout must be between %s and %s", minimumActive, maximumActive)
 	}
-	if config.batchMaxQueueSize < 0 || config.batchMaxExportSize < 0 {
+	if config.batchMaxQueueSize < 0 || config.batchMaxExportSize < 0 || config.metricMaxQueueSize < 0 {
 		return config, errors.New("OpenTelemetry batch sizes must not be negative")
 	}
 	if config.batchMaxQueueSize > 0 && config.batchMaxExportSize > config.batchMaxQueueSize {
@@ -271,20 +313,26 @@ func resolveConfig(options option.OpenTelemetryOptions) (reporterConfig, error) 
 	if (config.tls.ClientCertificate == "") != (config.tls.ClientKey == "") {
 		return config, errors.New("OpenTelemetry TLS client_certificate and client_key must be configured together")
 	}
+	if config.metricMaxQueueSize == 0 {
+		config.metricMaxQueueSize = 2048
+	}
 	return config, nil
 }
 
 type otelSink struct {
 	logger   otellog.Logger
 	provider *sdklog.LoggerProvider
+	metrics  *metricSink
 }
 
 func newOTelSink(ctx context.Context, config reporterConfig) (*otelSink, error) {
 	exporterOptions := make([]otlploghttp.Option, 0, 6)
-	if config.endpoint != "" {
-		exporterOptions = append(exporterOptions, otlploghttp.WithEndpointURL(config.endpoint))
+	if config.logsEndpoint != "" {
+		exporterOptions = append(exporterOptions, otlploghttp.WithEndpointURL(config.logsEndpoint))
+	} else if config.endpoint != "" {
+		exporterOptions = append(exporterOptions, otlploghttp.WithEndpointURL(signalEndpoint(config.endpoint, "logs")))
 	} else if os.Getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") == "" && os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {
-		exporterOptions = append(exporterOptions, otlploghttp.WithEndpointURL(defaultEndpoint))
+		exporterOptions = append(exporterOptions, otlploghttp.WithEndpointURL(signalEndpoint(defaultEndpoint, "logs")))
 	}
 	if len(config.headers) > 0 {
 		exporterOptions = append(exporterOptions, otlploghttp.WithHeaders(config.headers))
@@ -331,10 +379,26 @@ func newOTelSink(ctx context.Context, config reporterConfig) (*otelSink, error) 
 		return nil, err
 	}
 	provider := sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(processor))
+	metrics, err := newMetricSink(ctx, config, res, tlsConfig, configured)
+	if err != nil {
+		_ = provider.Shutdown(ctx)
+		return nil, err
+	}
 	return &otelSink{
 		logger:   provider.Logger(eventName, otellog.WithInstrumentationVersion(scopeVersion)),
 		provider: provider,
+		metrics:  metrics,
 	}, nil
+}
+
+func signalEndpoint(base string, signal string) string {
+	base = strings.TrimRight(base, "/")
+	if strings.HasSuffix(base, "/v1/logs") {
+		base = strings.TrimSuffix(base, "/v1/logs")
+	} else if strings.HasSuffix(base, "/v1/metrics") {
+		base = strings.TrimSuffix(base, "/v1/metrics")
+	}
+	return base + "/v1/" + signal
 }
 
 func buildResource(configured map[string]string) (*resource.Resource, error) {
@@ -417,8 +481,16 @@ func (s *otelSink) emit(segment flowSegment) {
 	s.logger.Emit(context.Background(), record)
 }
 
+func (s *otelSink) addTransport(outbound adapter.OutboundIdentity, network string, direction string, bytes int64) {
+	s.metrics.addTransport(outbound, network, direction, bytes)
+}
+
+func (s *otelSink) recordHealth(point healthPoint) {
+	s.metrics.recordHealth(point)
+}
+
 func (s *otelSink) shutdown(ctx context.Context) error {
-	return s.provider.Shutdown(ctx)
+	return errors.Join(s.provider.Shutdown(ctx), s.metrics.shutdown(ctx))
 }
 
 type FlowMetadata struct {
@@ -465,6 +537,10 @@ type Flow struct {
 	udpDownlinkBytes   int64
 	udpUplinkPackets   int64
 	udpDownlinkPackets int64
+
+	selectionAccess sync.RWMutex
+	selections      map[string]adapter.OutboundIdentity
+	selectedLeaf    adapter.OutboundIdentity
 
 	segmentAccess sync.RWMutex
 	segmentStart  time.Time
@@ -518,6 +594,77 @@ func (f *Flow) addDownlink(bytes int64, packet bool) {
 	}
 }
 
+func (f *Flow) RecordOutboundSelection(parent adapter.OutboundIdentity, selected adapter.OutboundIdentity) {
+	if f == nil || parent.Name == "" || selected.Name == "" {
+		return
+	}
+	f.selectionAccess.Lock()
+	if f.selections == nil {
+		f.selections = make(map[string]adapter.OutboundIdentity)
+	}
+	f.selections[parent.Name] = selected
+	f.selectionAccess.Unlock()
+}
+
+func (f *Flow) RecordOutboundLeaf(outbound adapter.OutboundIdentity) {
+	if f == nil || outbound.Name == "" {
+		return
+	}
+	f.selectionAccess.Lock()
+	f.selectedLeaf = outbound
+	f.selectionAccess.Unlock()
+}
+
+func (f *Flow) resolvedMetadata() FlowMetadata {
+	metadata := f.metadata
+	f.selectionAccess.RLock()
+	defer f.selectionAccess.RUnlock()
+	if len(f.selections) == 0 {
+		metadata.outboundChain = append([]string(nil), metadata.outboundChain...)
+		if f.selectedLeaf.Name != "" {
+			leaf := f.selectedLeaf
+			if len(metadata.outboundChain) == 0 {
+				metadata.outboundChain = append(metadata.outboundChain, leaf.Name)
+			} else if metadata.outboundChain[len(metadata.outboundChain)-1] != leaf.Name {
+				if metadata.egressName != "" && metadata.outboundChain[len(metadata.outboundChain)-1] == metadata.egressName {
+					metadata.outboundChain[len(metadata.outboundChain)-1] = leaf.Name
+				} else {
+					metadata.outboundChain = append(metadata.outboundChain, leaf.Name)
+				}
+			}
+			metadata.egressName = leaf.Name
+			metadata.egressType = normalizeType(leaf.Type)
+		}
+		return metadata
+	}
+	current := adapter.OutboundIdentity{Name: metadata.outboundName, Type: metadata.outboundType}
+	chain := make([]string, 0, len(f.selections)+2)
+	seen := make(map[string]struct{}, len(f.selections)+2)
+	for current.Name != "" && len(chain) < 32 {
+		if _, loaded := seen[current.Name]; loaded {
+			break
+		}
+		seen[current.Name] = struct{}{}
+		chain = append(chain, current.Name)
+		next, loaded := f.selections[current.Name]
+		if !loaded {
+			break
+		}
+		current = next
+	}
+	leaf := f.selectedLeaf
+	if leaf.Name != "" {
+		if len(chain) == 0 || chain[len(chain)-1] != leaf.Name {
+			chain = append(chain, leaf.Name)
+		}
+		current = leaf
+	}
+	metadata.outboundChain = chain
+	metadata.egressName = current.Name
+	metadata.egressType = normalizeType(current.Type)
+	return metadata
+}
+
 func (f *Flow) snapshot(end time.Time, reason string, closeFlow bool) {
 	if f == nil {
 		return
@@ -553,12 +700,13 @@ func (f *Flow) snapshot(end time.Time, reason string, closeFlow bool) {
 	}
 	f.sequence++
 	sequence := f.sequence
-	if uplinkBytes > 0 || uplinkPackets > 0 {
-		f.reporter.sink.emit(flowSegment{flow: f, direction: "uplink", start: start, end: end, bytes: uplinkBytes, packets: uplinkPackets, sequence: sequence, reason: reason})
-	}
-	if downlinkBytes > 0 || downlinkPackets > 0 {
-		f.reporter.sink.emit(flowSegment{flow: f, direction: "downlink", start: start, end: end, bytes: downlinkBytes, packets: downlinkPackets, sequence: sequence, reason: reason})
-	}
+	f.reporter.sink.emit(flowSegment{
+		metadata: f.resolvedMetadata(), id: f.id, network: f.network, udp: f.udp,
+		start: start, end: end,
+		uplinkBytes: uplinkBytes, downlinkBytes: downlinkBytes,
+		uplinkDatagrams: uplinkPackets, downlinkDatagrams: downlinkPackets,
+		sequence: sequence, reason: reason,
+	})
 	f.segmentAccess.Unlock()
 	if closeFlow {
 		f.reporter.remove(f)
@@ -566,24 +714,22 @@ func (f *Flow) snapshot(end time.Time, reason string, closeFlow bool) {
 }
 
 type flowSegment struct {
-	flow      *Flow
-	direction string
-	start     time.Time
-	end       time.Time
-	bytes     int64
-	packets   int64
-	sequence  int64
-	reason    string
+	metadata          FlowMetadata
+	id                string
+	network           string
+	udp               bool
+	start             time.Time
+	end               time.Time
+	uplinkBytes       int64
+	downlinkBytes     int64
+	uplinkDatagrams   int64
+	downlinkDatagrams int64
+	sequence          int64
+	reason            string
 }
 
 func (s flowSegment) attributes() []otellog.KeyValue {
-	metadata := s.flow.metadata
-	sourceAddress, sourcePort := metadata.clientAddress, metadata.clientPort
-	destinationAddress, destinationPort := metadata.destinationAddress, metadata.destinationPort
-	if s.direction == "downlink" {
-		sourceAddress, destinationAddress = destinationAddress, sourceAddress
-		sourcePort, destinationPort = destinationPort, sourcePort
-	}
+	metadata := s.metadata
 	attributes := make([]otellog.KeyValue, 0, 40)
 	appendString := func(key, value string) {
 		if value != "" {
@@ -609,25 +755,24 @@ func (s flowSegment) attributes() []otellog.KeyValue {
 			attributes = append(attributes, otellog.Slice(key, converted...))
 		}
 	}
-	appendString("source.address", sourceAddress)
-	appendInt("source.port", sourcePort)
-	appendString("destination.address", destinationAddress)
-	appendInt("destination.port", destinationPort)
-	appendString("network.transport", s.flow.network)
+	appendString("client.address", metadata.clientAddress)
+	appendInt("client.port", metadata.clientPort)
+	appendString("server.address", metadata.destinationAddress)
+	appendInt("server.port", metadata.destinationPort)
+	appendString("network.transport", s.network)
 	appendString("network.type", metadata.networkType)
 	attributes = append(attributes,
-		otellog.Int64("flow.io.bytes", s.bytes),
-		otellog.String("flow.type", "proxy"),
-		otellog.Int64("flow.start", s.start.UnixNano()),
-		otellog.Int64("flow.end", s.end.UnixNano()),
-		otellog.Int64("flow.sampling_rate", 1),
-		otellog.String("proxy.flow.id", s.flow.id),
-		otellog.String("proxy.flow.direction", s.direction),
+		otellog.Int64("proxy.flow.payload.uplink.bytes", s.uplinkBytes),
+		otellog.Int64("proxy.flow.payload.downlink.bytes", s.downlinkBytes),
+		otellog.String("proxy.flow.id", s.id),
 		otellog.Int64("proxy.flow.segment.sequence", s.sequence),
 		otellog.String("proxy.flow.end_reason", s.reason),
 	)
-	if s.flow.udp {
-		attributes = append(attributes, otellog.Int64("flow.io.packets", s.packets))
+	if s.udp {
+		attributes = append(attributes,
+			otellog.Int64("proxy.flow.payload.uplink.datagrams", s.uplinkDatagrams),
+			otellog.Int64("proxy.flow.payload.downlink.datagrams", s.downlinkDatagrams),
+		)
 	}
 	appendString("proxy.inbound.name", metadata.inboundName)
 	appendString("proxy.inbound.type", metadata.inboundType)

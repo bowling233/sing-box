@@ -45,6 +45,8 @@ type DefaultDialer struct {
 	powerManager           *powerreport.Manager
 	outboundManager        adapter.OutboundManager
 	dnsTransportManager    adapter.DNSTransportManager
+	telemetry              adapter.OutboundTelemetry
+	outboundIdentity       adapter.OutboundIdentity
 	networkStrategy        *C.NetworkStrategy
 	defaultNetworkStrategy bool
 	networkType            []C.InterfaceType
@@ -57,6 +59,8 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 	connectionManager := service.FromContext[adapter.ConnectionManager](ctx)
 	networkManager := service.FromContext[adapter.NetworkManager](ctx)
 	platformInterface := service.FromContext[adapter.PlatformInterface](ctx)
+	telemetry := service.FromContext[adapter.OutboundTelemetry](ctx)
+	outboundIdentity, _ := adapter.OutboundIdentityFromContext(ctx)
 
 	var (
 		dialer                 net.Dialer
@@ -240,6 +244,8 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 		powerManager:           service.FromContext[*powerreport.Manager](ctx),
 		outboundManager:        service.FromContext[adapter.OutboundManager](ctx),
 		dnsTransportManager:    service.FromContext[adapter.DNSTransportManager](ctx),
+		telemetry:              telemetry,
+		outboundIdentity:       outboundIdentity,
 		networkStrategy:        networkStrategy,
 		defaultNetworkStrategy: defaultNetworkStrategy,
 		networkType:            networkType,
@@ -286,7 +292,7 @@ func (d *DefaultDialer) DialContext(ctx context.Context, network string, address
 				return DialSlowContext(&d.dialer6, ctx, network, address)
 			}
 		})
-		return d.trackConn(ctx, address, conn, err)
+		return d.trackConn(ctx, network, address, conn, err)
 	} else {
 		return d.DialParallelInterface(ctx, network, address, d.networkStrategy, d.networkType, d.fallbackNetworkType, d.networkFallbackDelay)
 	}
@@ -337,7 +343,7 @@ func (d *DefaultDialer) DialParallelInterface(ctx context.Context, network strin
 	if !fastFallback && !isPrimary {
 		d.networkLastFallback.Store(time.Now())
 	}
-	return d.trackConn(ctx, address, conn, nil)
+	return d.trackConn(ctx, network, address, conn, nil)
 }
 
 func (d *DefaultDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -416,9 +422,18 @@ func (d *DefaultDialer) UDPListenerControl() (control.Func, bool) {
 	return listenerControl, egressEnabled
 }
 
-func (d *DefaultDialer) trackConn(ctx context.Context, destination M.Socksaddr, conn net.Conn, err error) (net.Conn, error) {
+func (d *DefaultDialer) trackConn(ctx context.Context, network string, destination M.Socksaddr, conn net.Conn, err error) (net.Conn, error) {
 	if err != nil {
 		return conn, err
+	}
+	if d.telemetry != nil && d.outboundIdentity.Name != "" {
+		adapter.RecordOutboundLeaf(ctx, d.outboundIdentity)
+		transport := N.NetworkName(network)
+		conn = bufio.NewCounterConn(conn, []N.CountFunc{func(n int64) {
+			d.telemetry.ObserveTransport(d.outboundIdentity, transport, "receive", n)
+		}}, []N.CountFunc{func(n int64) {
+			d.telemetry.ObserveTransport(d.outboundIdentity, transport, "transmit", n)
+		}})
 	}
 	if d.connectionManager != nil {
 		conn = d.connectionManager.TrackConn(conn)
@@ -441,6 +456,14 @@ func (d *DefaultDialer) trackConn(ctx context.Context, destination M.Socksaddr, 
 func (d *DefaultDialer) trackPacketConn(ctx context.Context, destination M.Socksaddr, conn net.PacketConn, err error) (net.PacketConn, error) {
 	if err != nil {
 		return conn, err
+	}
+	if d.telemetry != nil && d.outboundIdentity.Name != "" {
+		adapter.RecordOutboundLeaf(ctx, d.outboundIdentity)
+		conn = bufio.NewNetPacketConn(bufio.NewCounterPacketConn(bufio.NewPacketConn(conn), []N.CountFunc{func(n int64) {
+			d.telemetry.ObserveTransport(d.outboundIdentity, N.NetworkUDP, "receive", n)
+		}}, []N.CountFunc{func(n int64) {
+			d.telemetry.ObserveTransport(d.outboundIdentity, N.NetworkUDP, "transmit", n)
+		}}))
 	}
 	if d.connectionManager != nil {
 		conn = d.connectionManager.TrackPacketConn(conn)

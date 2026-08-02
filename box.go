@@ -250,6 +250,20 @@ func New(options Options) (*Box, error) {
 		router.AppendTracker(trafficManager)
 		internalServices = append(internalServices, trafficManager)
 	}
+	if experimentalOptions.OpenTelemetry != nil && experimentalOptions.OpenTelemetry.Enabled && !oteltraffic.SDKDisabled() {
+		trafficReporter, err := oteltraffic.New(
+			ctx,
+			logFactory.NewLogger("opentelemetry"),
+			*experimentalOptions.OpenTelemetry,
+			outboundManager,
+		)
+		if err != nil {
+			return nil, E.Cause(err, "create OpenTelemetry traffic reporter")
+		}
+		service.MustRegister[adapter.OutboundTelemetry](ctx, trafficReporter)
+		router.AppendTracker(trafficReporter)
+		internalServices = append(internalServices, trafficReporter)
+	}
 	ntpOptions := common.PtrValueOrDefault(options.NTP)
 	var timeService *tls.TimeServiceWrapper
 	if ntpOptions.Enabled {
@@ -387,7 +401,7 @@ func New(options Options) (*Box, error) {
 	}
 	outboundManager.Initialize(func() (adapter.Outbound, error) {
 		return direct.NewOutbound(
-			ctx,
+			adapter.ContextWithOutboundIdentity(ctx, adapter.OutboundIdentity{Name: "direct", Type: C.TypeDirect}),
 			router,
 			logFactory.NewLogger("outbound/direct"),
 			"direct",
@@ -419,19 +433,6 @@ func New(options Options) (*Box, error) {
 		cacheFile := cachefile.New(ctx, logFactory.NewLogger("cache-file"), common.PtrValueOrDefault(experimentalOptions.CacheFile))
 		service.MustRegister[adapter.CacheFile](ctx, cacheFile)
 		internalServices = append(internalServices, cacheFile)
-	}
-	if experimentalOptions.OpenTelemetry != nil && experimentalOptions.OpenTelemetry.Enabled && !oteltraffic.SDKDisabled() {
-		trafficReporter, err := oteltraffic.New(
-			ctx,
-			logFactory.NewLogger("opentelemetry"),
-			*experimentalOptions.OpenTelemetry,
-			outboundManager,
-		)
-		if err != nil {
-			return nil, E.Cause(err, "create OpenTelemetry traffic reporter")
-		}
-		router.AppendTracker(trafficReporter)
-		internalServices = append(internalServices, trafficReporter)
 	}
 	if needClashAPI {
 		clashAPIOptions := common.PtrValueOrDefault(experimentalOptions.ClashAPI)

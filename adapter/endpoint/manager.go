@@ -118,6 +118,7 @@ func (m *Manager) Remove(tag string) error {
 }
 
 func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, outboundType string, options any) error {
+	ctx = adapter.ContextWithOutboundIdentity(ctx, adapter.OutboundIdentity{Name: tag, Type: outboundType})
 	endpoint, err := m.registry.Create(ctx, router, logger, tag, outboundType, options)
 	if err != nil {
 		return err

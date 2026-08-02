@@ -18,6 +18,8 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	otellog "go.opentelemetry.io/otel/log"
 	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	collectormetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -32,6 +34,10 @@ func (s *captureSink) emit(segment flowSegment) {
 	s.access.Unlock()
 }
 
+func (s *captureSink) addTransport(adapter.OutboundIdentity, string, string, int64) {}
+
+func (s *captureSink) recordHealth(healthPoint) {}
+
 func (s *captureSink) shutdown(context.Context) error { return nil }
 
 func (s *captureSink) snapshot() []flowSegment {
@@ -43,34 +49,31 @@ func (s *captureSink) snapshot() []flowSegment {
 func TestCanonicalFlowContract(t *testing.T) {
 	start := time.Unix(1, 0)
 	end := time.Unix(61, 0)
-	flow := &Flow{
-		metadata: FlowMetadata{
-			clientAddress:      "192.0.2.10",
-			clientPort:         52341,
-			destinationAddress: "example.com",
-			destinationPort:    443,
-			inboundName:        "tun-in",
-			inboundType:        "tun",
-			outboundName:       "auto-select",
-			outboundType:       "url_test",
-			outboundChain:      []string{"auto-select", "node-a"},
-			egressName:         "node-a",
-			ruleMatched:        true,
-			ruleType:           "domain_suffix",
-			ruleValue:          "example.com",
-			ruleAction:         "auto-select",
-			resolvedAddresses:  []string{"203.0.113.8"},
-			protocolName:       "tls",
-			processName:        "curl",
-			processPath:        "/usr/bin/curl",
-			processUID:         1000,
-		},
-		id:      "00000000-0000-4000-8000-000000000001",
-		network: "tcp",
+	metadata := FlowMetadata{
+		clientAddress:      "192.0.2.10",
+		clientPort:         52341,
+		destinationAddress: "example.com",
+		destinationPort:    443,
+		inboundName:        "tun-in",
+		inboundType:        "tun",
+		outboundName:       "auto-select",
+		outboundType:       "url_test",
+		outboundChain:      []string{"auto-select", "node-a"},
+		egressName:         "node-a",
+		ruleMatched:        true,
+		ruleType:           "domain_suffix",
+		ruleValue:          "example.com",
+		ruleAction:         "auto-select",
+		resolvedAddresses:  []string{"203.0.113.8"},
+		protocolName:       "tls",
+		processName:        "curl",
+		processPath:        "/usr/bin/curl",
+		processUID:         1000,
 	}
 	segment := flowSegment{
-		flow: flow, direction: "uplink", start: start, end: end,
-		bytes: 18432, sequence: 1, reason: "active_timeout",
+		metadata: metadata, id: "00000000-0000-4000-8000-000000000001", network: "tcp",
+		start: start, end: end, uplinkBytes: 18432, downlinkBytes: 2048,
+		sequence: 1, reason: "active_timeout",
 	}
 	assertGolden(t, segment)
 }
@@ -93,19 +96,18 @@ func TestDirectionAndSegmentAccounting(t *testing.T) {
 	flow.addUplink(7, false)
 	flow.addDownlink(11, false)
 	flow.snapshot(end, "closed", true)
-	if len(sink.segments) != 2 {
-		t.Fatalf("got %d segments, want 2", len(sink.segments))
+	if len(sink.segments) != 1 {
+		t.Fatalf("got %d segments, want 1", len(sink.segments))
 	}
-	uplink := attributesMap(sink.segments[0].attributes())
-	downlink := attributesMap(sink.segments[1].attributes())
-	if uplink["source.address"] != "192.0.2.1" || uplink["destination.address"] != "198.51.100.2" || uplink["flow.io.bytes"] != int64(7) {
-		t.Fatalf("unexpected uplink: %#v", uplink)
+	attributes := attributesMap(sink.segments[0].attributes())
+	if attributes["client.address"] != "192.0.2.1" || attributes["server.address"] != "198.51.100.2" {
+		t.Fatalf("unexpected endpoints: %#v", attributes)
 	}
-	if downlink["source.address"] != "198.51.100.2" || downlink["destination.address"] != "192.0.2.1" || downlink["flow.io.bytes"] != int64(11) {
-		t.Fatalf("unexpected downlink: %#v", downlink)
+	if attributes["proxy.flow.payload.uplink.bytes"] != int64(7) || attributes["proxy.flow.payload.downlink.bytes"] != int64(11) {
+		t.Fatalf("unexpected counters: %#v", attributes)
 	}
-	if _, exists := uplink["flow.io.packets"]; exists {
-		t.Fatal("TCP segment contains flow.io.packets")
+	if _, exists := attributes["proxy.flow.payload.uplink.datagrams"]; exists {
+		t.Fatal("TCP segment contains datagram counters")
 	}
 }
 
@@ -119,7 +121,7 @@ func TestZeroLengthUDPDatagram(t *testing.T) {
 		t.Fatalf("got %d segments, want 1", len(sink.segments))
 	}
 	attributes := attributesMap(sink.segments[0].attributes())
-	if attributes["flow.io.bytes"] != int64(0) || attributes["flow.io.packets"] != int64(1) {
+	if attributes["proxy.flow.payload.uplink.bytes"] != int64(0) || attributes["proxy.flow.payload.downlink.bytes"] != int64(0) || attributes["proxy.flow.payload.uplink.datagrams"] != int64(1) || attributes["proxy.flow.payload.downlink.datagrams"] != int64(0) {
 		t.Fatalf("unexpected UDP counters: %#v", attributes)
 	}
 }
@@ -161,6 +163,50 @@ func TestMetadataDoesNotTreatInboundListenerAsOriginalDestination(t *testing.T) 
 	}
 }
 
+func TestFlowUsesSuccessfulOutboundSelection(t *testing.T) {
+	flow := &Flow{metadata: FlowMetadata{
+		outboundName:  "select",
+		outboundType:  "selector",
+		outboundChain: []string{"select", "stale-node"},
+		egressName:    "stale-node",
+		egressType:    "vless",
+	}}
+	flow.RecordOutboundSelection(
+		adapter.OutboundIdentity{Name: "select", Type: "selector"},
+		adapter.OutboundIdentity{Name: "auto", Type: "urltest"},
+	)
+	flow.RecordOutboundSelection(
+		adapter.OutboundIdentity{Name: "auto", Type: "urltest"},
+		adapter.OutboundIdentity{Name: "node-b", Type: "Hysteria2"},
+	)
+	flow.RecordOutboundLeaf(adapter.OutboundIdentity{Name: "node-b", Type: "Hysteria2"})
+	metadata := flow.resolvedMetadata()
+	if !reflect.DeepEqual(metadata.outboundChain, []string{"select", "auto", "node-b"}) || metadata.egressName != "node-b" || metadata.egressType != "hysteria2" {
+		t.Fatalf("unexpected successful selection: %#v", metadata)
+	}
+}
+
+func TestFlowLeafUpdatePreservesPrematchedChain(t *testing.T) {
+	flow := &Flow{metadata: FlowMetadata{
+		outboundName:  "select",
+		outboundType:  "selector",
+		outboundChain: []string{"select", "auto", "node-a"},
+		egressName:    "node-a",
+		egressType:    "vless",
+	}}
+	flow.RecordOutboundLeaf(adapter.OutboundIdentity{Name: "node-a", Type: "VLESS"})
+	metadata := flow.resolvedMetadata()
+	if !reflect.DeepEqual(metadata.outboundChain, []string{"select", "auto", "node-a"}) || metadata.egressName != "node-a" || metadata.egressType != "vless" {
+		t.Fatalf("unexpected prematched chain: %#v", metadata)
+	}
+
+	flow.RecordOutboundLeaf(adapter.OutboundIdentity{Name: "node-b", Type: "Hysteria2"})
+	metadata = flow.resolvedMetadata()
+	if !reflect.DeepEqual(metadata.outboundChain, []string{"select", "auto", "node-b"}) || metadata.egressName != "node-b" || metadata.egressType != "hysteria2" {
+		t.Fatalf("unexpected updated leaf: %#v", metadata)
+	}
+}
+
 func TestActiveSnapshotCloseRace(t *testing.T) {
 	for iteration := 0; iteration < 100; iteration++ {
 		sink := new(captureSink)
@@ -192,7 +238,7 @@ func TestActiveSnapshotCloseRace(t *testing.T) {
 		segments := sink.snapshot()
 		var total int64
 		for _, segment := range segments {
-			total += segment.bytes
+			total += segment.uplinkBytes + segment.downlinkBytes
 		}
 		if total != 1 {
 			t.Fatalf("iteration %d: got %d bytes across %#v", iteration, total, segments)
@@ -207,7 +253,26 @@ func TestActiveSnapshotCloseRace(t *testing.T) {
 
 func TestOTLPHTTPExport(t *testing.T) {
 	requests := make(chan *collectorlogspb.ExportLogsServiceRequest, 1)
+	metricRequests := make(chan *collectormetricspb.ExportMetricsServiceRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1/metrics" {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			exportRequest := new(collectormetricspb.ExportMetricsServiceRequest)
+			if err = proto.Unmarshal(body, exportRequest); err != nil {
+				t.Error(err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			metricRequests <- exportRequest
+			writer.Header().Set("Content-Type", "application/x-protobuf")
+			writer.WriteHeader(http.StatusOK)
+			return
+		}
 		if request.URL.Path != "/v1/logs" {
 			t.Errorf("unexpected path %q", request.URL.Path)
 		}
@@ -233,14 +298,20 @@ func TestOTLPHTTPExport(t *testing.T) {
 	defer server.Close()
 
 	sink, err := newOTelSink(context.Background(), reporterConfig{
-		endpoint: server.URL + "/v1/logs",
-		headers:  map[string]string{"X-Test-Token": "present"},
+		endpoint:           server.URL,
+		headers:            map[string]string{"X-Test-Token": "present"},
+		metricMaxQueueSize: 16,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	flow := &Flow{metadata: FlowMetadata{clientAddress: "192.0.2.1", destinationAddress: "example.com", processUID: -1}, id: "flow-id", network: "tcp"}
-	sink.emit(flowSegment{flow: flow, direction: "uplink", start: time.Unix(1, 0), end: time.Unix(2, 0), bytes: 5, sequence: 1, reason: "closed"})
+	sink.emit(flowSegment{
+		metadata: FlowMetadata{clientAddress: "192.0.2.1", destinationAddress: "example.com", processUID: -1},
+		id:       "flow-id", network: "tcp", start: time.Unix(1, 0), end: time.Unix(2, 0), uplinkBytes: 5, sequence: 1, reason: "closed",
+	})
+	sink.addTransport(adapter.OutboundIdentity{Name: "node-a", Type: "VLESS"}, "tcp", "transmit", 12)
+	sink.recordHealth(healthPoint{outbound: adapter.OutboundIdentity{Name: "node-a", Type: "VLESS"}, url: "https://example.com/204", latencyMS: 37, completedAt: time.Unix(3, 4)})
+	sink.recordHealth(healthPoint{outbound: adapter.OutboundIdentity{Name: "node-a", Type: "VLESS"}, url: "https://example.com/204", latencyMS: 41, completedAt: time.Unix(5, 6)})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err = sink.shutdown(ctx); err != nil {
@@ -262,6 +333,36 @@ func TestOTLPHTTPExport(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for OTLP request")
 	}
+
+	select {
+	case exportRequest := <-metricRequests:
+		transport := findMetric(exportRequest, transportMetricName)
+		if transport == nil || transport.Unit != "By" || !transport.GetSum().IsMonotonic || len(transport.GetSum().DataPoints) != 1 || transport.GetSum().DataPoints[0].GetAsInt() != 12 {
+			t.Fatalf("unexpected transport metric: %#v", transport)
+		}
+		health := findMetric(exportRequest, healthMetricName)
+		if health == nil || health.Unit != "ms" || len(health.GetGauge().DataPoints) != 2 {
+			t.Fatalf("unexpected health metric: %#v", health)
+		}
+		if health.GetGauge().DataPoints[0].TimeUnixNano != uint64(time.Unix(3, 4).UnixNano()) || health.GetGauge().DataPoints[0].GetAsInt() != 37 || health.GetGauge().DataPoints[1].TimeUnixNano != uint64(time.Unix(5, 6).UnixNano()) || health.GetGauge().DataPoints[1].GetAsInt() != 41 {
+			t.Fatalf("health points lost precision or ordering: %#v", health.GetGauge().DataPoints)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for OTLP metrics request")
+	}
+}
+
+func findMetric(request *collectormetricspb.ExportMetricsServiceRequest, name string) *metricspb.Metric {
+	for _, resourceMetrics := range request.ResourceMetrics {
+		for _, scopeMetrics := range resourceMetrics.ScopeMetrics {
+			for _, metric := range scopeMetrics.Metrics {
+				if metric.Name == name {
+					return metric
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func resourceAttribute(request *collectorlogspb.ExportLogsServiceRequest, key string) string {

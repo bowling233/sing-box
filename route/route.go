@@ -170,6 +170,9 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
 	}
+	if selectionRecorder, loaded := common.Cast[adapter.OutboundSelectionRecorder](conn); loaded {
+		ctx = adapter.ContextWithOutboundSelectionRecorder(ctx, selectionRecorder)
+	}
 	if outboundHandler, isHandler := selectedOutbound.(adapter.ConnectionHandler); isHandler {
 		outboundHandler.NewConnection(ctx, conn, metadata, onClose)
 	} else {
@@ -301,6 +304,9 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	metadata.RouteOutbound = selectedOutbound.Tag()
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedPacketConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
+	}
+	if selectionRecorder, loaded := common.Cast[adapter.OutboundSelectionRecorder](conn); loaded {
+		ctx = adapter.ContextWithOutboundSelectionRecorder(ctx, selectionRecorder)
 	}
 	if metadata.FakeIP {
 		conn = newFakeIPNATPacketConn(bufio.NewNetPacketConn(conn), metadata.OriginDestination, metadata.Destination)
@@ -449,6 +455,7 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 			return continueResult
 		}
 	}
+	matchedOutbound := outbound
 	for range 8 {
 		group, isGroup := outbound.(adapter.OutboundGroup)
 		if !isGroup {
@@ -518,8 +525,11 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 		flowTrackers := make([]tun.FlowTracker, 0, len(r.trackers)+1)
 		flowTrackers = append(flowTrackers, newFlowLogger(ctx, r.logger, metadataCopy, outbound))
 		for _, tracker := range r.trackers {
-			flowTracker := tracker.RoutedFlow(ctx, metadataCopy, matchedRule, outbound)
+			flowTracker := tracker.RoutedFlow(ctx, metadataCopy, matchedRule, matchedOutbound)
 			if flowTracker != nil {
+				if selectionRecorder, loaded := flowTracker.(adapter.OutboundSelectionRecorder); loaded {
+					selectionRecorder.RecordOutboundLeaf(adapter.IdentityOf(outbound))
+				}
 				flowTrackers = append(flowTrackers, flowTracker)
 			}
 		}
