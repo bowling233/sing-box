@@ -11,16 +11,25 @@ type ExperimentalOptions struct {
 }
 
 type OpenTelemetryOptions struct {
-	Enabled            bool                      `json:"enabled,omitempty"`
-	Endpoint           string                    `json:"endpoint,omitempty"`
-	Protocol           string                    `json:"protocol,omitempty"`
-	Headers            map[string]string         `json:"headers,omitempty"`
-	Compression        string                    `json:"compression,omitempty"`
-	Timeout            badoption.Duration        `json:"timeout,omitempty"`
-	ActiveTimeout      badoption.Duration        `json:"active_timeout,omitempty"`
-	Batch              OpenTelemetryBatchOptions `json:"batch,omitempty"`
-	TLS                OpenTelemetryTLSOptions   `json:"tls,omitempty"`
-	ResourceAttributes map[string]string         `json:"resource_attributes,omitempty"`
+	Enabled            bool                        `json:"enabled,omitempty"`
+	Endpoint           string                      `json:"endpoint,omitempty"`
+	LogsEndpoint       string                      `json:"logs_endpoint,omitempty"`
+	MetricsEndpoint    string                      `json:"metrics_endpoint,omitempty"`
+	Protocol           string                      `json:"protocol,omitempty"`
+	Headers            map[string]string           `json:"headers,omitempty"`
+	Compression        string                      `json:"compression,omitempty"`
+	Timeout            badoption.Duration          `json:"timeout,omitempty"`
+	ActiveTimeout      badoption.Duration          `json:"active_timeout,omitempty"`
+	Batch              OpenTelemetryBatchOptions   `json:"batch,omitempty"`
+	Metrics            OpenTelemetryMetricsOptions `json:"metrics,omitempty"`
+	TLS                OpenTelemetryTLSOptions     `json:"tls,omitempty"`
+	ResourceAttributes map[string]string           `json:"resource_attributes,omitempty"`
+}
+
+type OpenTelemetryMetricsOptions struct {
+	ExportInterval badoption.Duration `json:"export_interval,omitempty"`
+	ExportTimeout  badoption.Duration `json:"export_timeout,omitempty"`
+	MaxQueueSize   int                `json:"max_queue_size,omitempty"`
 }
 
 type OpenTelemetryBatchOptions struct {

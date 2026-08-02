@@ -1,16 +1,35 @@
 package opentelemetry
 
 import (
+	"context"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
+
+func TestRoutedFlowLifecycle(t *testing.T) {
+	sink := new(captureSink)
+	reporter := &Reporter{sink: sink, flows: make(map[*Flow]struct{})}
+	tracker := reporter.RoutedFlow(context.Background(), adapter.InboundContext{Network: N.NetworkUDP}, nil, nil)
+	if tracker == nil {
+		t.Fatal("missing flow tracker")
+	}
+	tracker.CountForward(0)
+	tracker.CountReverse(5)
+	tracker.CloseFlow(0)
+	tracker.CountReverse(1)
+	segments := sink.snapshot()
+	if len(segments) != 1 || segments[0].uplinkDatagrams != 1 || segments[0].uplinkBytes != 0 || segments[0].downlinkDatagrams != 1 || segments[0].downlinkBytes != 5 {
+		t.Fatalf("unexpected TUN flow segment: %#v", segments)
+	}
+}
 
 type scriptedRead struct {
 	data []byte
@@ -119,12 +138,8 @@ func TestTrackedConnCountsAllIOPaths(t *testing.T) {
 
 	var uplink, downlink int64
 	for _, segment := range sink.snapshot() {
-		switch segment.direction {
-		case "uplink":
-			uplink += segment.bytes
-		case "downlink":
-			downlink += segment.bytes
-		}
+		uplink += segment.uplinkBytes
+		downlink += segment.downlinkBytes
 	}
 	if uplink != 13 || downlink != 17 {
 		t.Fatalf("got uplink=%d downlink=%d", uplink, downlink)
@@ -218,22 +233,12 @@ func TestTrackedPacketConnCountsSuccessfulDatagrams(t *testing.T) {
 	}
 
 	segments := sink.snapshot()
-	if len(segments) != 2 {
+	if len(segments) != 1 {
 		t.Fatalf("got %d segments: %#v", len(segments), segments)
 	}
-	for _, segment := range segments {
-		switch segment.direction {
-		case "uplink":
-			if segment.bytes != 5 || segment.packets != 2 {
-				t.Fatalf("unexpected uplink segment: %#v", segment)
-			}
-		case "downlink":
-			if segment.bytes != 7 || segment.packets != 2 {
-				t.Fatalf("unexpected downlink segment: %#v", segment)
-			}
-		default:
-			t.Fatalf("unexpected direction %q", segment.direction)
-		}
+	segment := segments[0]
+	if segment.uplinkBytes != 5 || segment.uplinkDatagrams != 2 || segment.downlinkBytes != 7 || segment.downlinkDatagrams != 2 {
+		t.Fatalf("unexpected UDP segment: %#v", segment)
 	}
 }
 
@@ -308,7 +313,7 @@ func TestTrackedConnCloseWaitsForInFlightCount(t *testing.T) {
 	}
 
 	segments := sink.snapshot()
-	if len(segments) != 1 || segments[0].direction != "uplink" || segments[0].bytes != 3 {
+	if len(segments) != 1 || segments[0].uplinkBytes != 3 || segments[0].downlinkBytes != 0 {
 		t.Fatalf("unexpected final segments: %#v", segments)
 	}
 }

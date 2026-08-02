@@ -1,21 +1,26 @@
-# OpenTelemetry Traffic
+# OpenTelemetry observability
 
-The OpenTelemetry traffic reporter exports native per-flow payload counters as
-OTLP/HTTP protobuf log records. It does not depend on the Clash API.
+The OpenTelemetry reporter exports three native signals through OTLP/HTTP
+protobuf:
 
-Each TCP connection or UDP association is split into `uplink` and `downlink`
-`proxy.flow` records. Long-lived flows emit incremental records at the active
-timeout. TCP packet counts are omitted; UDP records include datagram counts.
-Known routing-rule and process attributes are always included. Inbound
-authentication users are never exported. Enabling this reporter does not enable
-additional process lookup; use the existing route process settings when needed.
+- bidirectional per-flow payload records in `proxy.flow` logs;
+- actual outbound socket traffic in the monotonic
+  `proxy.outbound.transport.io` counter;
+- every successful URL test as an individual
+  `proxy.outbound.health_check.latency` Gauge point.
+
+Flow records include routing-rule and already available process metadata. The
+client identity is represented by its original network endpoint. The reporter
+uses the route process information already collected by sing-box.
 
 ### Structure
 
 ```json
 {
   "enabled": true,
-  "endpoint": "http://127.0.0.1:4318/v1/logs",
+  "endpoint": "http://127.0.0.1:4318",
+  "logs_endpoint": "",
+  "metrics_endpoint": "",
   "protocol": "http/protobuf",
   "headers": {},
   "compression": "gzip",
@@ -27,6 +32,11 @@ additional process lookup; use the existing route process settings when needed.
     "max_queue_size": 2048,
     "max_export_batch_size": 512
   },
+  "metrics": {
+    "export_interval": "60s",
+    "export_timeout": "30s",
+    "max_queue_size": 2048
+  },
   "tls": {
     "ca_certificate": "",
     "client_certificate": "",
@@ -34,7 +44,8 @@ additional process lookup; use the existing route process settings when needed.
     "insecure_skip_verify": false
   },
   "resource_attributes": {
-    "deployment.environment.name": "home"
+    "deployment.environment.name": "home",
+    "service.instance.id": "proxy-node-a"
   }
 }
 ```
@@ -43,14 +54,23 @@ additional process lookup; use the existing route process settings when needed.
 
 #### enabled
 
-Enable traffic export. Disabled by default. `OTEL_SDK_DISABLED=true` also
-disables the reporter.
+Enable OpenTelemetry export. Disabled by default.
+`OTEL_SDK_DISABLED=true` also disables the reporter.
 
 #### endpoint
 
-Complete OTLP logs URL. The default is
-`http://127.0.0.1:4318/v1/logs`. Standard signal-specific and general OTLP
-environment variables are used when this field is empty.
+Collector base URL. `/v1/logs` and `/v1/metrics` are appended for their
+respective signals. An URL ending in either signal path is also accepted and
+the sibling signal URL is derived automatically. The default is
+`http://127.0.0.1:4318`.
+
+#### logs_endpoint
+
+Complete OTLP Logs URL. When set, it overrides `endpoint` for logs.
+
+#### metrics_endpoint
+
+Complete OTLP Metrics URL. When set, it overrides `endpoint` for metrics.
 
 #### protocol
 
@@ -58,25 +78,40 @@ Only `http/protobuf` is supported.
 
 #### headers
 
-Additional OTLP HTTP headers.
+Additional OTLP HTTP headers shared by both signals.
 
 #### compression
 
-Empty, `none`, or `gzip`.
+Empty, `none`, or `gzip` for both signals.
 
 #### timeout
 
-Timeout for one export request. The exporter default is `10s`.
+Timeout for one exporter HTTP request.
 
 #### active_timeout
 
 Interval for incremental long-lived-flow records. The default is `60s`; valid
-values range from `10s` through `24h`.
+values range from `10s` through `24h`. A segment with traffic contains both
+uplink and downlink payload counters, including zero for the empty direction.
 
 #### batch
 
-Batch log record processor settings. Defaults are `1s`, `30s`, `2048`, and
-`512`, respectively. `max_export_batch_size` cannot exceed `max_queue_size`.
+Batch log processor schedule delay, export timeout, queue size, and export
+batch size. `max_export_batch_size` cannot exceed `max_queue_size`.
+
+#### metrics
+
+Periodic metric export interval and timeout. `max_queue_size` bounds pending
+URL-test points while retaining their original completion timestamps.
+
+`proxy.outbound.transport.io` counts bytes at the actual leaf outbound's outer
+socket. It includes proxy handshakes, encryption, protocol framing, QUIC/TLS,
+and multiplex transport traffic. The attributes identify the outbound,
+transport, and `transmit` or `receive` direction.
+
+`proxy.outbound.health_check.latency` uses integer milliseconds. Each
+successful URL test is retained as a separate Gauge point with the actual
+completion time, outbound identity, and `url.full`.
 
 #### tls
 
@@ -85,10 +120,12 @@ verification override. `insecure_skip_verify` should only be used for testing.
 
 #### resource_attributes
 
-Additional string-valued OpenTelemetry resource attributes. The reporter
-always sets `proxy.flow.schema.version`; it cannot be overridden.
+Additional string-valued OpenTelemetry Resource attributes. The reporter sets
+`proxy.flow.schema.version=v1alpha2`. A configured
+`service.instance.id` remains stable across process restarts.
 
-The reporter also honors standard `OTEL_SERVICE_NAME`,
+The reporter honors standard `OTEL_SERVICE_NAME`,
 `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_*`,
-`OTEL_EXPORTER_OTLP_LOGS_*`, and `OTEL_BLRP_*` environment variables. The
-configuration block must still have `enabled: true`.
+`OTEL_EXPORTER_OTLP_LOGS_*`, `OTEL_EXPORTER_OTLP_METRICS_*`, `OTEL_BLRP_*`,
+`OTEL_METRIC_EXPORT_INTERVAL`, and `OTEL_METRIC_EXPORT_TIMEOUT` environment
+variables. The configuration block must still set `enabled: true`.

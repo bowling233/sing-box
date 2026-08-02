@@ -166,11 +166,12 @@ func (m *Manager) Default() adapter.Outbound {
 	return m.defaultOutbound
 }
 
-func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, inboundType string, options any) error {
+func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, outboundType string, options any) error {
 	if tag == "" {
 		return os.ErrInvalid
 	}
-	outbound, err := m.registry.CreateOutbound(ctx, router, logger, tag, inboundType, options)
+	ctx = adapter.ContextWithOutboundIdentity(ctx, adapter.OutboundIdentity{Name: tag, Type: outboundType})
+	outbound, err := m.registry.CreateOutbound(ctx, router, logger, tag, outboundType, options)
 	if err != nil {
 		return err
 	}
