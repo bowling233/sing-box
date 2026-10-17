@@ -26,7 +26,7 @@ const (
 // (https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md) and gRPC-Web
 // streams over WebSocket, wire compatible with the improbable-eng/grpc-web
 // client transports.
-func newHTTPHandler(logger log.ContextLogger, grpcServer *grpc.Server, options option.APIServiceOptions, dashboard *dashboard) http.Handler {
+func newHTTPHandler(logger log.ContextLogger, grpcServer *grpc.Server, options option.APIServiceOptions, dashboard *dashboard, oauth *githubOAuth) http.Handler {
 	allowedOrigins := options.AccessControlAllowOrigin
 	if len(allowedOrigins) == 0 {
 		allowedOrigins = []string{"*"}
@@ -34,7 +34,7 @@ func newHTTPHandler(logger log.ContextLogger, grpcServer *grpc.Server, options o
 	corsHandler := cors.New(cors.Options{
 		AllowedOrigins:      allowedOrigins,
 		AllowedMethods:      []string{http.MethodGet, http.MethodPost, http.MethodOptions},
-		AllowedHeaders:      []string{"Content-Type", "Authorization", "X-Grpc-Web", "X-User-Agent", "Grpc-Timeout"},
+		AllowedHeaders:      []string{"Content-Type", "Authorization", "X-Grpc-Web", "X-User-Agent", "Grpc-Timeout", "X-CSRF-Token"},
 		ExposedHeaders:      []string{"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"},
 		AllowPrivateNetwork: options.AccessControlAllowPrivateNetwork,
 		MaxAge:              300,
@@ -43,6 +43,7 @@ func newHTTPHandler(logger log.ContextLogger, grpcServer *grpc.Server, options o
 		logger:     logger,
 		grpcServer: grpcServer,
 		dashboard:  dashboard,
+		oauth:      oauth,
 	})
 }
 
@@ -50,18 +51,38 @@ type webBridge struct {
 	logger     log.ContextLogger
 	grpcServer *grpc.Server
 	dashboard  *dashboard
+	oauth      *githubOAuth
 }
 
 func (b *webBridge) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if b.oauth != nil && b.oauth.serveAuth(writer, request) {
+		return
+	}
+	if b.oauth == nil && request.URL.Path == "/auth/session" {
+		writer.Header().Set("Cache-Control", "no-store")
+		writer.Header().Set("Content-Type", "application/json")
+		writer.Write([]byte(`{"enabled":false}`))
+		return
+	}
 	contentType := request.Header.Get("Content-Type")
 	switch {
 	case isWebSocketGRPCRequest(request):
 		b.serveWebSocket(writer, request)
 	case request.Method == http.MethodPost && strings.HasPrefix(contentType, contentTypeGRPCWeb):
+		if b.oauth != nil && !b.oauth.authorize(writer, request, request.Header) {
+			return
+		}
 		b.serveWeb(writer, request)
 	case request.ProtoMajor == 2 && strings.HasPrefix(contentType, contentTypeGRPC):
+		if b.oauth != nil && !b.oauth.authorize(writer, request, request.Header) {
+			return
+		}
 		b.grpcServer.ServeHTTP(writer, request)
 	case b.dashboard != nil:
+		if b.oauth != nil && b.oauth.session(request) == nil {
+			http.Redirect(writer, request, "/auth/github/login", http.StatusFound)
+			return
+		}
 		b.dashboard.serveHTTP(writer, request)
 	default:
 		http.NotFound(writer, request)

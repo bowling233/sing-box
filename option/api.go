@@ -13,6 +13,7 @@ type APIServiceOptions struct {
 	Secret                           string                     `json:"secret,omitempty"`
 	AccessControlAllowOrigin         badoption.Listable[string] `json:"access_control_allow_origin,omitempty" examples:"http://sing-box-dashboard.sagernet.org/,https://sing-box-dashboard.sagernet.org/"`
 	AccessControlAllowPrivateNetwork bool                       `json:"access_control_allow_private_network,omitempty"`
+	GitHubOAuth                      *APIGitHubOAuthOptions     `json:"github_oauth,omitempty"`
 	Dashboard                        *APIDashboardOptions       `json:"dashboard,omitempty"`
 	InboundTLSOptionsContainer
 }
@@ -59,4 +60,15 @@ func (o APIDashboardOptions) DescribeSchema(builder schema.Builder) (*schema.Nod
 		return nil, err
 	}
 	return schema.AnyOf(schema.BooleanNode(), schema.StringNode(), objectForm), nil
+}
+
+// APIGitHubOAuthOptions configures same-origin browser authentication.
+type APIGitHubOAuthOptions struct {
+	HTTPClient           *HTTPClientOptions `json:"http_client,omitempty"`
+	Enabled              bool               `json:"enabled,omitempty"`
+	ClientID             string             `json:"client_id,omitempty"`
+	ClientSecret         string             `json:"client_secret,omitempty"`
+	PublicURL            string             `json:"public_url,omitempty"`
+	AllowedUserIDs       []int64            `json:"allowed_user_ids,omitempty"`
+	AllowedOrganizations []string           `json:"allowed_organizations,omitempty"`
 }

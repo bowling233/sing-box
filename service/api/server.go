@@ -17,6 +17,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
 	aTLS "github.com/sagernet/sing/common/tls"
+	"github.com/sagernet/sing/service"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c" //nolint:staticcheck
@@ -33,6 +34,7 @@ type Service struct {
 	listener  *listener.Listener
 	tlsConfig tls.ServerConfig
 	dashboard *dashboard
+	oauth     *githubOAuth
 }
 
 func NewService(ctx context.Context, logger log.ContextLogger, tag string, options option.APIServiceOptions) (adapter.Service, error) {
@@ -46,6 +48,13 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 			Network: []string{N.NetworkTCP},
 			Listen:  options.ListenOptions,
 		}),
+	}
+	if options.GitHubOAuth != nil && options.GitHubOAuth.Enabled {
+		var err error
+		s.oauth, err = newGitHubOAuth(*options.GitHubOAuth, options.Secret)
+		if err != nil {
+			return nil, E.Cause(err, "configure GitHub OAuth")
+		}
 	}
 	if options.TLS != nil {
 		tlsConfig, err := tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))
@@ -65,12 +74,25 @@ func (s *Service) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 		return nil
 	}
 	ctx := scope.Context()
+	if s.oauth != nil {
+		manager := service.FromContext[adapter.HTTPClientManager](ctx)
+		transport, err := manager.ResolveTransport(ctx, s.logger, common.PtrValueOrDefault(s.options.GitHubOAuth.HTTPClient))
+		if err != nil {
+			return E.Cause(err, "create GitHub OAuth http client")
+		}
+		s.oauth.client.Transport = transport
+		scope.Add(func() error { s.oauth.client.CloseIdleConnections(); return nil })
+	}
 	startedService := daemon.NewAttachedService(ctx)
 	scope.Add(func() error {
 		startedService.Close()
 		return nil
 	})
-	grpcServer := daemon.NewServer(startedService, s.options.Secret)
+	secret := s.options.Secret
+	if s.oauth != nil {
+		secret = s.oauth.internalSecret
+	}
+	grpcServer := daemon.NewServer(startedService, secret)
 	scope.Add(func() error {
 		grpcServer.Stop()
 		return nil
@@ -84,7 +106,7 @@ func (s *Service) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	}
 	httpServer := &http.Server{
 		//nolint:staticcheck
-		Handler: h2c.NewHandler(newHTTPHandler(s.logger, grpcServer, s.options, s.dashboard), new(http2.Server)),
+		Handler: h2c.NewHandler(newHTTPHandler(s.logger, grpcServer, s.options, s.dashboard, s.oauth), new(http2.Server)),
 		BaseContext: func(net.Listener) context.Context {
 			return ctx
 		},

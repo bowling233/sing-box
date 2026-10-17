@@ -44,7 +44,9 @@ func (b *webBridge) serveWebSocket(writer http.ResponseWriter, request *http.Req
 	conn.SetReadLimit(webSocketReadLimit)
 	ctx, cancel := context.WithCancel(request.Context())
 	defer cancel()
-	messageType, firstMessage, err := conn.Read(ctx)
+	headerContext, cancelHeader := context.WithTimeout(ctx, 10*time.Second)
+	messageType, firstMessage, err := conn.Read(headerContext)
+	cancelHeader()
 	if err != nil {
 		conn.CloseNow()
 		return
@@ -57,6 +59,10 @@ func (b *webBridge) serveWebSocket(writer http.ResponseWriter, request *http.Req
 	if err != nil {
 		b.logger.Error("parse websocket request metadata: ", err)
 		conn.CloseNow()
+		return
+	}
+	if b.oauth != nil && !b.oauth.authorizeHeaders(request, header) {
+		conn.Close(websocket.StatusPolicyViolation, "authentication required")
 		return
 	}
 	contentType := header.Get("Content-Type")
